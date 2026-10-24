@@ -24,6 +24,8 @@ button:focus-visible,.btn:focus-within,input:focus-visible,select:focus-visible{
 select,input[type=date],input[type=number],input[type=text],input[type=search]{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px}
 .filters{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--border)}
 .filters label{display:flex;gap:6px;align-items:center}
+#flt-custom{display:flex;gap:12px;align-items:center}
+#flt-custom[hidden]{display:none}
 #status{color:var(--muted);font-size:13px;margin-left:auto}
 nav{display:flex;flex-wrap:wrap;gap:4px;padding:10px 20px 0}
 nav button{border-radius:8px 8px 0 0;border-bottom:none}
@@ -152,8 +154,18 @@ input[type=date]::-webkit-calendar-picker-indicator{display:none}
 
 <div class="filters" role="group" aria-label="Filtros globales">
   <label>Deporte <select id="flt-sport"></select></label>
-  <label>Desde <input type="date" id="flt-from"></label>
-  <label>Hasta <input type="date" id="flt-to"></label>
+  <label>Periodo <select id="flt-range">
+    <option value="all">Todo</option>
+    <option value="week">Última semana</option>
+    <option value="month">Último mes</option>
+    <option value="3months">Últimos 3 meses</option>
+    <option value="custom">Personalizado…</option>
+  </select></label>
+  <span id="flt-range-txt" class="muted"></span>
+  <span id="flt-custom" hidden>
+    <label>Desde <input type="date" id="flt-from"></label>
+    <label>Hasta <input type="date" id="flt-to"></label>
+  </span>
   <label><input type="checkbox" id="flt-short"> Ocultar actividades de menos de 1 km</label>
   <button id="b-reset-flt" type="button">Quitar filtros</button>
   <span id="status" aria-live="polite"></span>
@@ -256,7 +268,7 @@ const MES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','
 /* ---------------- Estado y sesión ---------------- */
 function defaultSettings(){
   return {theme: (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light',
-    page:'overview', maxHR:null, hideShort:true, metrics:DEFAULT_METRICS.slice(), sport:'__all', from:'', to:'',
+    page:'overview', maxHR:null, hideShort:true, metrics:DEFAULT_METRICS.slice(), sport:'__all', range:'all', from:'', to:'',
     excluded:[], compareIds:[], cmpMode:'sessions', cmpSports:[], pA:{from:'',to:''}, pB:{from:'',to:''}, pSport:'__all',
     goals:[], races:[], sortKey:'Fecha', sortDir:-1, search:'', allCols:false,
     coachTask:'semanal', coachN:15, coachWeeks:4, coachDays:4, coachAbout:'', coachQ:'', coachAct:'', coachTitles:false,
@@ -276,6 +288,24 @@ function applySession(o){
   if(!o || !Array.isArray(o.activities)) throw new Error('El archivo no es una sesión válida de este panel.');
   S = {activities:o.activities, meta:o.meta||{}, headers:o.headers||[], series:Array.isArray(o.series)?o.series:[], savedAt:o.savedAt||null,
        settings:Object.assign(defaultSettings(), o.settings||{})};
+  // Sesiones antiguas (sin «Periodo»): si tenían fechas puestas, se conservan como «Personalizado».
+  const os = o.settings||{};
+  if(!os.range && (os.from || os.to)) S.settings.range = 'custom';
+}
+/* Periodo predefinido -> fechas Desde/Hasta. Se recalcula cada vez, así «Última semana» siempre es relativa a hoy. */
+const RANGE_PRESETS = {week:'Última semana', month:'Último mes', '3months':'Últimos 3 meses'};
+function rangeDates(r, now = new Date()){
+  const to = ymd(now), d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if(r==='week') d.setDate(d.getDate()-6);            // hoy y los 6 días anteriores = 7 días
+  else if(r==='month') d.setMonth(d.getMonth()-1);     // mismo día del mes anterior
+  else if(r==='3months') d.setMonth(d.getMonth()-3);
+  else return null;
+  return {from: ymd(d), to};
+}
+function applyRange(){
+  const st = S.settings, rd = rangeDates(st.range);
+  if(rd){ st.from = rd.from; st.to = rd.to; }
+  else if(st.range==='all'){ st.from = ''; st.to = ''; }
 }
 let saveTimer = null;
 function save(){
@@ -1474,10 +1504,15 @@ async function copyCoachPrompt(ai){
 /* ---------------- Render general ---------------- */
 const PAGES = {overview:renderOverview, running:renderRunning, heart:renderHeart, form:renderForm, compare:renderCompare, goals:renderGoals, table:renderTable, coach:renderCoach};
 function syncFilters(){
+  applyRange();
   const st = S.settings, sp = allSports();
   if(st.sport!=='__all' && !sp.includes(st.sport)) st.sport='__all';
   $('#flt-sport').innerHTML = `<option value="__all">Todos los deportes</option>` + sp.map(s => `<option ${st.sport===s?'selected':''}>${esc(s)}</option>`).join('');
   $('#flt-sport').value = st.sport; $('#flt-from').value = st.from; $('#flt-to').value = st.to; $('#flt-short').checked = st.hideShort;
+  $('#flt-range').value = st.range;
+  $('#flt-custom').hidden = st.range!=='custom';
+  const dm = s => s ? s.split('-').reverse().join('/') : '';
+  $('#flt-range-txt').textContent = RANGE_PRESETS[st.range] ? dm(st.from)+' – '+dm(st.to) : '';
 }
 function renderStatus(){
   const n = S.activities.length, ns = (S.series||[]).length;
@@ -1544,8 +1579,15 @@ function bind(){
   $('#b-theme').onclick = () => { S.settings.theme = S.settings.theme==='dark' ? 'light' : 'dark'; save(); render(); };
 
   $('#flt-sport').onchange = e => { S.settings.sport = e.target.value; save(); render(); };
-  $('#flt-from').onchange = e => { S.settings.from = e.target.value; save(); render(); };
-  $('#flt-to').onchange = e => { S.settings.to = e.target.value; save(); render(); };
+  $('#flt-range').onchange = e => {
+    const st = S.settings; st.range = e.target.value;
+    // Al pasar a «Personalizado» se mantienen las fechas del periodo anterior como punto de partida.
+    if(st.range==='custom' && !st.from && !st.to){ const rd = rangeDates('month'); st.from = rd.from; st.to = rd.to; }
+    save(); render();
+    if(st.range==='custom') $('#flt-from').focus();
+  };
+  $('#flt-from').onchange = e => { S.settings.range = 'custom'; S.settings.from = e.target.value; save(); render(); };
+  $('#flt-to').onchange = e => { S.settings.range = 'custom'; S.settings.to = e.target.value; save(); render(); };
   $('#flt-short').onchange = e => { S.settings.hideShort = e.target.checked; save(); render(); };
   $('#b-reset-flt').onclick = resetFilters;
 
@@ -1651,7 +1693,7 @@ function bind(){
     save(); render(); toast('Objetivo guardado.');
   });
 }
-function resetFilters(){ Object.assign(S.settings, {sport:'__all', from:'', to:''}); save(); render(); }
+function resetFilters(){ Object.assign(S.settings, {sport:'__all', range:'all', from:'', to:''}); save(); render(); }
 
 /* ---------------- Inicio ---------------- */
 bind();
